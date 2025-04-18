@@ -11,14 +11,13 @@ use ffmpeg_next::{
     software::scaling::context::Context as ScalingContext, util::format::pixel::Pixel,
 };
 use image::error::ImageError;
-use image::io::Reader as ImageReader;
-use image::{DynamicImage, ImageOutputFormat};
+use image::{ColorType, DynamicImage};
 use psd::Psd;
 use std::ffi::OsStr;
 use std::fmt::Debug;
-use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
+use webp::Encoder;
 
 #[derive(Debug)]
 enum Size {
@@ -57,7 +56,7 @@ pub enum ApiError {
     FailedToDecode(ImageError),
 
     #[error("Failed to encode: err={0}")]
-    FailedToEncode(ImageError),
+    FailedToEncode(String),
 }
 
 impl ResponseError for ApiError {
@@ -120,9 +119,9 @@ fn is_not_modified(req: &HttpRequest, modified_time: SystemTime) -> bool {
 async fn original(
     _req: HttpRequest,
     path: web::Path<String>,
-    base_path: web::Data<std::path::PathBuf>,
+    app_data: web::Data<AppData>,
 ) -> Result<fs::NamedFile, Error> {
-    let canonical_path = path_from_key(base_path.get_ref(), &path.into_inner())?;
+    let canonical_path = path_from_key(app_data.base_path.as_path(), &path.into_inner())?;
 
     let named_file = fs::NamedFile::open(canonical_path)?;
     Ok(named_file
@@ -137,9 +136,9 @@ async fn original(
 async fn media(
     req: HttpRequest,
     path: web::Path<String>,
-    base_path: web::Data<std::path::PathBuf>,
+    app_data: web::Data<AppData>,
 ) -> Result<impl Responder, Error> {
-    let canonical_path = path_from_key(base_path.get_ref(), &path.into_inner())?;
+    let canonical_path = path_from_key(app_data.base_path.as_path(), &path.into_inner())?;
 
     // Check Last Modified header
     let modified_time = std::fs::metadata(&canonical_path)?
@@ -150,7 +149,12 @@ async fn media(
     }
 
     let img = load_image_handle_api_error(&canonical_path)?;
-    Ok(build_webp_response(img, &canonical_path, modified_time)?)
+    Ok(build_webp_response(
+        img,
+        &canonical_path,
+        modified_time,
+        app_data.media_quality,
+    )?)
 }
 
 #[get("/thumbnail/{tail:.*}")]
@@ -158,13 +162,13 @@ async fn thumbnail(
     req: HttpRequest,
     path: web::Path<String>,
     query: web::Query<std::collections::HashMap<String, String>>,
-    base_path: web::Data<std::path::PathBuf>,
+    app_data: web::Data<AppData>,
 ) -> Result<impl Responder, Error> {
     let size = query
         .get("size")
         .map(|s| Size::from_str(s))
         .unwrap_or(Size::Medium);
-    let canonical_path = path_from_key(base_path.get_ref(), &path.into_inner())?;
+    let canonical_path = path_from_key(app_data.base_path.as_path(), &path.into_inner())?;
 
     // Check Last Modified header
     let modified_time = std::fs::metadata(&canonical_path)?
@@ -181,6 +185,7 @@ async fn thumbnail(
         resized,
         &canonical_path,
         modified_time,
+        app_data.thumbnail_quality,
     )?)
 }
 
@@ -203,7 +208,7 @@ fn load_image(path: &Path) -> Result<DynamicImage, ImageError> {
 }
 
 fn load_image_from_file(path: &Path) -> Result<DynamicImage, ImageError> {
-    ImageReader::open(path)?.decode()
+    image::ImageReader::open(path)?.decode()
 }
 
 fn load_image_from_psd(path: &Path) -> Result<DynamicImage, ImageError> {
@@ -314,16 +319,26 @@ fn build_webp_response(
     img: DynamicImage,
     path: &Path,
     modified_time: SystemTime,
+    quality: f32,
 ) -> Result<HttpResponse, ApiError> {
-    let mut buffer = Cursor::new(Vec::new());
-    if let Err(err) = img.write_to(&mut buffer, ImageOutputFormat::WebP) {
+    let rgba8 = match img.color() {
+        ColorType::Rgb32F => DynamicImage::ImageRgb8(img.to_rgb8()),
+        ColorType::Rgba32F => DynamicImage::ImageRgba8(img.to_rgba8()),
+        ColorType::Rgb16 => DynamicImage::ImageRgb8(img.to_rgb8()),
+        ColorType::Rgba16 => DynamicImage::ImageRgba8(img.to_rgba8()),
+        ColorType::Rgb8 | ColorType::Rgba8 => img,
+        _ => DynamicImage::ImageRgb8(img.to_rgb8()),
+    };
+
+    let encoder = Encoder::from_image(&rgba8).map_err(|err| {
         log::warn!(
             "Failed to encode image: {}:{}",
             path.to_str().unwrap_or("N/A"),
             err,
         );
-        return Err(ApiError::FailedToEncode(err));
-    }
+        ApiError::FailedToEncode(err.to_string())
+    })?;
+    let webp_data = encoder.encode(quality);
 
     Ok(HttpResponse::Ok()
         .content_type("image/webp")
@@ -332,7 +347,7 @@ fn build_webp_response(
             header::CacheDirective::MaxAge(2592000u32),
         ]))
         .insert_header(header::LastModified(modified_time.into()))
-        .body(buffer.into_inner()))
+        .body(webp_data.to_vec()))
 }
 
 #[derive(Parser)]
@@ -348,6 +363,18 @@ struct Args {
 
     #[arg(short, long, default_value_t = 8080)]
     port: u16,
+
+    #[arg(short, long, default_value_t = 95.0)]
+    thumbnail_quality: f32,
+
+    #[arg(short, long, default_value_t = 97.0)]
+    media_quality: f32,
+}
+
+struct AppData {
+    base_path: PathBuf,
+    thumbnail_quality: f32,
+    media_quality: f32,
 }
 
 #[actix_web::main]
@@ -355,15 +382,19 @@ async fn main() -> std::io::Result<()> {
     env_logger::init_from_env(env_logger::Env::new().default_filter_or("INFO"));
 
     let args = Args::parse();
+    let base_path = args.base_path.canonicalize().expect("Invalid base path");
+    let app_data = web::Data::new(AppData {
+        base_path,
+        thumbnail_quality: args.thumbnail_quality,
+        media_quality: args.media_quality,
+    });
 
     log::info!("Starting HTTP server at http://{}:{}", args.bind, args.port);
-
-    let base_path = args.base_path.canonicalize().expect("Invalid base path");
 
     HttpServer::new(move || {
         App::new()
             .wrap(Logger::default())
-            .app_data(web::Data::new(base_path.clone()))
+            .app_data(app_data.clone())
             .service(thumbnail)
             .service(media)
             .service(original)

@@ -79,6 +79,7 @@ GET /raw/<filename>
 | HTTP サーバー | [actix-web](https://crates.io/crates/actix-web) |
 | 画像処理 | [image](https://crates.io/crates/image) |
 | PSD 読み込み | [psd](https://crates.io/crates/psd) |
+| WebP 書き込み | [webp](https://crates.io/crates/webp) |
 | 動画処理 | [ffmpeg-next](https://crates.io/crates/ffmpeg-next) + FFmpeg CLI 依存なし |
 | ログ・エラーハンドリング | thiserror, log |
 

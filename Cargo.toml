@@ -5,7 +5,7 @@ edition = '2024'
 
 [dependencies]
 actix-web = "4"
-image = { version = "0.24", features = ["webp"] }
+image = { version = "0.25.6", features = ["webp"] }
 clap = { version = "4", features = ["derive"] }
 chrono = "0.4.40"
 httpdate = "1.0.3"
@@ -17,3 +17,4 @@ actix-files = "0.6.6"
 serde = { version = "1.0", features = ["derive"] }
 thiserror = "2.0.12"
 ffmpeg-next = "7.1.0"
+webp = "0.3.0"
