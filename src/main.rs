@@ -6,6 +6,7 @@ use clap::Parser;
 use httpdate::HttpDate;
 use image::io::Reader as ImageReader;
 use image::{DynamicImage, ImageOutputFormat};
+use psd::Psd;
 use std::io::Cursor;
 use std::path::PathBuf;
 use std::time::SystemTime;
@@ -80,15 +81,57 @@ async fn thumbnail(
         }
     }
 
-    // 画像読み込みとリサイズ
-    let img_reader_result = ImageReader::open(&canonical_path);
-    let img_result = match img_reader_result {
-        Ok(img_reader) => img_reader.decode(),
-        Err(_) => return HttpResponse::InternalServerError().body("Failed to open image"),
+    let extension = canonical_path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    let img_result = match extension.as_str() {
+        "psd" => {
+            // PSD 読み込み＆プレビュー画像取得
+            match std::fs::read(&canonical_path) {
+                Ok(bytes) => match Psd::from_bytes(&bytes) {
+                    Ok(psd) => {
+                        let rgba = psd.rgba();
+                        let width = psd.width();
+                        let height = psd.height();
+                        // RGBA を ImageBuffer に変換
+                        let img_buf = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(
+                            width,
+                            height,
+                            rgba.to_vec(),
+                        );
+                        img_buf.map(DynamicImage::ImageRgba8).ok_or_else(|| {
+                            image::ImageError::Limits(image::error::LimitError::from_kind(
+                                image::error::LimitErrorKind::DimensionError,
+                            ))
+                        })
+                    }
+                    Err(_) => Err(image::ImageError::Decoding(
+                        image::error::DecodingError::new(
+                            image::error::ImageFormatHint::Unknown,
+                            "Failed to parse PSD",
+                        ),
+                    )),
+                },
+                Err(_) => Err(image::ImageError::IoError(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "Failed to read PSD file",
+                ))),
+            }
+        }
+        _ => {
+            // 通常画像 (JPEG/PNG/WEBP など)
+            match ImageReader::open(&canonical_path) {
+                Ok(img_reader) => img_reader.decode(),
+                Err(err) => Err(image::ImageError::IoError(err)),
+            }
+        }
     };
 
     let resized = match img_result {
-        Ok(img) => resize_image(img, size),
+        Ok(mut img) => resize_image(&mut img, size),
         Err(_) => return HttpResponse::InternalServerError().body("Failed to decode image"),
     };
 
@@ -104,7 +147,7 @@ async fn thumbnail(
         .body(buffer.into_inner());
 }
 
-fn resize_image(img: DynamicImage, size: Size) -> DynamicImage {
+fn resize_image(img: &mut DynamicImage, size: Size) -> DynamicImage {
     let (w, h) = size.dimensions();
     img.thumbnail(w, h)
 }
