@@ -325,15 +325,24 @@ fn load_image_from_movie_keyframe(path: &Path) -> Result<DynamicImage, ImageErro
             while decoder.receive_frame(&mut decoded).is_ok() {
                 let mut rgb_frame = Video::empty();
                 scaler.run(&decoded, &mut rgb_frame).unwrap();
-                let width = rgb_frame.width();
-                let height = rgb_frame.height();
+
+                let width = rgb_frame.width() as usize;
+                let height = rgb_frame.height() as usize;
+                let stride = rgb_frame.stride(0) as usize;
                 let data = rgb_frame.data(0);
-                let image_buffer = image::RgbImage::from_raw(width, height, data.to_vec())
+
+                let mut buffer = Vec::with_capacity(width * height * 3);
+                for y in 0..height {
+                    let row_start = y * stride;
+                    buffer.extend_from_slice(&data[row_start..row_start + width * 3]);
+                }
+
+                let image_buffer = image::RgbImage::from_raw(width as u32, height as u32, buffer)
                     .ok_or_else(|| {
-                        image::ImageError::Limits(image::error::LimitError::from_kind(
-                            image::error::LimitErrorKind::DimensionError,
-                        ))
-                    })?;
+                    image::ImageError::Limits(image::error::LimitError::from_kind(
+                        image::error::LimitErrorKind::DimensionError,
+                    ))
+                })?;
                 return Ok(DynamicImage::ImageRgb8(image_buffer));
             }
         }
