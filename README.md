@@ -1,8 +1,16 @@
 # Rust HTTP メディアサムネイルサーバー
 
-## 起動方法
+## Dependencies
 
-```bash
+Install FFmpeg libraries & clang
+
+```
+apt install clang libavcodec-dev libavformat-dev libavutil-dev pkg-config
+```
+
+## Run
+
+```
 cargo run -- --base-path /mnt/nas/media
 ```
 
@@ -78,11 +86,11 @@ GET /raw/<filename>
 
 ## 今後の方針
 
-### サムネイル生成の改善（動画）
+### 動画サムネイル生成の改善
 - 最初のキーフレームが暗転（フェードイン）している場合、ユーザーが期待する内容でない
 - 複数のキーフレームからスコアリングして「意味のある」サムネイルを選ぶ
 
-### 改善案
+#### 改善案
 1. 明るさスコアによるフィルタリング
 2. フレームごとのヒストグラム/情報量スコアによる評価
 3. クエリパラメータでサムネイル選択戦略を切り替え（`?strategy=best|first`）
@@ -91,6 +99,9 @@ GET /raw/<filename>
 - [x] PSD flatten 対応
 - [x] 動画対応（初期）
 - [ ] PDF サムネイル（今後対応の可能性）
+
+### 画像配信の最適化
+- `/media` で配信する最大解像度を制限
 
 ---
 
