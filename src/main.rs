@@ -1,7 +1,5 @@
 use actix_files as fs;
-use actix_web::http::header::{
-    ContentDisposition, DispositionType, CACHE_CONTROL, IF_MODIFIED_SINCE, LAST_MODIFIED,
-};
+use actix_web::http::header;
 use actix_web::http::StatusCode;
 use actix_web::{
     get, middleware::Logger, web, App, Error, HttpRequest, HttpResponse, HttpServer, Responder,
@@ -12,7 +10,6 @@ use ffmpeg_next::{
     codec, format, frame::Video, media::Type, software::scaling,
     software::scaling::context::Context as ScalingContext, util::format::pixel::Pixel,
 };
-use httpdate::HttpDate;
 use image::error::ImageError;
 use image::io::Reader as ImageReader;
 use image::{DynamicImage, ImageOutputFormat};
@@ -109,14 +106,14 @@ fn path_from_key(base_path: &Path, key: &str) -> Result<std::path::PathBuf, ApiE
 }
 
 fn is_not_modified(req: &HttpRequest, modified_time: SystemTime) -> bool {
-    if let Some(ims) = req.headers().get(IF_MODIFIED_SINCE) {
+    if let Some(ims) = req.headers().get(header::IF_MODIFIED_SINCE) {
         if let Ok(ims_str) = ims.to_str() {
             if let Ok(ims_time) = httpdate::parse_http_date(ims_str) {
                 return modified_time <= ims_time;
             }
         }
     }
-    return false;
+    false
 }
 
 #[get("/raw/{tail:.*}")]
@@ -130,8 +127,8 @@ async fn original(
     let named_file = fs::NamedFile::open(canonical_path)?;
     Ok(named_file
         .use_last_modified(true)
-        .set_content_disposition(ContentDisposition {
-            disposition: DispositionType::Attachment,
+        .set_content_disposition(header::ContentDisposition {
+            disposition: header::DispositionType::Attachment,
             parameters: vec![],
         }))
 }
@@ -141,44 +138,19 @@ async fn media(
     req: HttpRequest,
     path: web::Path<String>,
     base_path: web::Data<std::path::PathBuf>,
-) -> impl Responder {
-    let canonical_path = match path_from_key(base_path.get_ref(), &path.into_inner()) {
-        Ok(p) => p,
-        Err(err) => {
-            log::warn!("Mulformed path: err={}", err);
-            return HttpResponse::NotFound().body("File not found");
-        }
-    };
+) -> Result<impl Responder, Error> {
+    let canonical_path = path_from_key(base_path.get_ref(), &path.into_inner())?;
 
-    // ファイルの最終更新日時
-    let metadata = match std::fs::metadata(&canonical_path) {
-        Ok(meta) => meta,
-        Err(_) => return HttpResponse::InternalServerError().body("Failed to read metadata"),
-    };
-
-    let modified_time = metadata.modified().unwrap_or(SystemTime::now());
+    // Check Last Modified header
+    let modified_time = std::fs::metadata(&canonical_path)?
+        .modified()
+        .unwrap_or(SystemTime::now());
     if is_not_modified(&req, modified_time) {
-        return HttpResponse::NotModified().finish();
+        return Ok(HttpResponse::NotModified().finish());
     }
 
-    let img = match load_image(&canonical_path) {
-        Ok(img) => img,
-        Err(err) => {
-            log::warn!("Failed to decode image: {}", err);
-            return HttpResponse::InternalServerError().body("Failed to decode image");
-        }
-    };
-
-    let mut buffer = Cursor::new(Vec::new());
-    if let Err(_) = img.write_to(&mut buffer, ImageOutputFormat::WebP) {
-        return HttpResponse::InternalServerError().body("Failed to encode image");
-    }
-
-    return HttpResponse::Ok()
-        .content_type("image/webp")
-        .insert_header((CACHE_CONTROL, "public, max-age=2592000"))
-        .insert_header((LAST_MODIFIED, HttpDate::from(modified_time).to_string()))
-        .body(buffer.into_inner());
+    let img = load_image_handle_api_error(&canonical_path)?;
+    Ok(build_webp_response(img, &canonical_path, modified_time)?)
 }
 
 #[get("/thumbnail/{tail:.*}")]
@@ -187,51 +159,33 @@ async fn thumbnail(
     path: web::Path<String>,
     query: web::Query<std::collections::HashMap<String, String>>,
     base_path: web::Data<std::path::PathBuf>,
-) -> impl Responder {
+) -> Result<impl Responder, Error> {
     let size = query
         .get("size")
         .map(|s| Size::from_str(s))
         .unwrap_or(Size::Medium);
-    let canonical_path = match path_from_key(base_path.get_ref(), &path.into_inner()) {
-        Ok(p) => p,
-        Err(err) => {
-            log::warn!("Mulformed path: err={}", err);
-            return HttpResponse::NotFound().body("File not found");
-        }
-    };
+    let canonical_path = path_from_key(base_path.get_ref(), &path.into_inner())?;
 
-    // ファイルの最終更新日時
-    let metadata = match std::fs::metadata(&canonical_path) {
-        Ok(meta) => meta,
-        Err(_) => return HttpResponse::InternalServerError().body("Failed to read metadata"),
-    };
-
-    let modified_time = metadata.modified().unwrap_or(SystemTime::now());
+    // Check Last Modified header
+    let modified_time = std::fs::metadata(&canonical_path)?
+        .modified()
+        .unwrap_or(SystemTime::now());
     if is_not_modified(&req, modified_time) {
-        return HttpResponse::NotModified().finish();
+        return Ok(HttpResponse::NotModified().finish());
     }
 
-    let img = match load_image(&canonical_path) {
-        Ok(img) => img,
-        Err(err) => {
-            log::warn!("Failed to decode image: {}", err);
-            return HttpResponse::InternalServerError().body("Failed to decode image");
-        }
-    };
-
+    let img = load_image_handle_api_error(&canonical_path)?;
     let (w, h) = size.dimensions();
     let resized = img.thumbnail(w, h);
+    Ok(build_webp_response(
+        resized,
+        &canonical_path,
+        modified_time,
+    )?)
+}
 
-    let mut buffer = Cursor::new(Vec::new());
-    if let Err(_) = resized.write_to(&mut buffer, ImageOutputFormat::WebP) {
-        return HttpResponse::InternalServerError().body("Failed to encode image");
-    }
-
-    return HttpResponse::Ok()
-        .content_type("image/webp")
-        .insert_header((CACHE_CONTROL, "public, max-age=2592000"))
-        .insert_header((LAST_MODIFIED, HttpDate::from(modified_time).to_string()))
-        .body(buffer.into_inner());
+fn load_image_handle_api_error(path: &Path) -> Result<DynamicImage, ApiError> {
+    load_image(path).map_err(ApiError::FailedToDecode)
 }
 
 fn load_image(path: &Path) -> Result<DynamicImage, ImageError> {
@@ -242,18 +196,18 @@ fn load_image(path: &Path) -> Result<DynamicImage, ImageError> {
         .to_lowercase();
 
     match ext.as_str() {
-        "psd" => return load_image_from_psd(path),
-        "mp4" | "webm" | "mov" => return load_image_from_movie_keyframe(path),
-        _ => return load_image_from_file(path),
+        "psd" => load_image_from_psd(path),
+        "mp4" | "webm" | "mov" => load_image_from_movie_keyframe(path),
+        _ => load_image_from_file(path),
     }
 }
 
 fn load_image_from_file(path: &Path) -> Result<DynamicImage, ImageError> {
-    ImageReader::open(&path)?.decode()
+    ImageReader::open(path)?.decode()
 }
 
 fn load_image_from_psd(path: &Path) -> Result<DynamicImage, ImageError> {
-    let bytes = std::fs::read(&path)?;
+    let bytes = std::fs::read(path)?;
     let psd = Psd::from_bytes(&bytes).map_err(|err| {
         image::ImageError::Decoding(image::error::DecodingError::new(
             image::error::ImageFormatHint::Unknown,
@@ -328,7 +282,7 @@ fn load_image_from_movie_keyframe(path: &Path) -> Result<DynamicImage, ImageErro
 
                 let width = rgb_frame.width() as usize;
                 let height = rgb_frame.height() as usize;
-                let stride = rgb_frame.stride(0) as usize;
+                let stride = rgb_frame.stride(0);
                 let data = rgb_frame.data(0);
 
                 let mut buffer = Vec::with_capacity(width * height * 3);
@@ -354,6 +308,31 @@ fn load_image_from_movie_keyframe(path: &Path) -> Result<DynamicImage, ImageErro
             "No frame extracted",
         ),
     ))
+}
+
+fn build_webp_response(
+    img: DynamicImage,
+    path: &Path,
+    modified_time: SystemTime,
+) -> Result<HttpResponse, ApiError> {
+    let mut buffer = Cursor::new(Vec::new());
+    if let Err(err) = img.write_to(&mut buffer, ImageOutputFormat::WebP) {
+        log::warn!(
+            "Failed to encode image: {}:{}",
+            path.to_str().unwrap_or("N/A"),
+            err,
+        );
+        return Err(ApiError::FailedToEncode(err));
+    }
+
+    Ok(HttpResponse::Ok()
+        .content_type("image/webp")
+        .insert_header(header::CacheControl(vec![
+            header::CacheDirective::Public,
+            header::CacheDirective::MaxAge(2592000u32),
+        ]))
+        .insert_header(header::LastModified(modified_time.into()))
+        .body(buffer.into_inner()))
 }
 
 #[derive(Parser)]
