@@ -8,6 +8,10 @@ use actix_web::{
     ResponseError,
 };
 use clap::Parser;
+use ffmpeg_next::{
+    codec, format, frame::Video, media::Type, software::scaling,
+    software::scaling::context::Context as ScalingContext, util::format::pixel::Pixel,
+};
 use httpdate::HttpDate;
 use image::error::ImageError;
 use image::io::Reader as ImageReader;
@@ -239,6 +243,7 @@ fn load_image(path: &Path) -> Result<DynamicImage, ImageError> {
 
     match ext.as_str() {
         "psd" => return load_image_from_psd(path),
+        "mp4" | "webm" | "mov" => return load_image_from_movie_keyframe(path),
         _ => return load_image_from_file(path),
     }
 }
@@ -267,6 +272,79 @@ fn load_image_from_psd(path: &Path) -> Result<DynamicImage, ImageError> {
             ))
         })?;
     Ok(DynamicImage::ImageRgba8(img_buf))
+}
+
+fn load_image_from_movie_keyframe(path: &Path) -> Result<DynamicImage, ImageError> {
+    ffmpeg_next::init().ok(); // すでに初期化済なら何もしない
+
+    let mut ictx = format::input(&path).map_err(|_| {
+        image::ImageError::Decoding(image::error::DecodingError::new(
+            image::error::ImageFormatHint::Unknown,
+            "Failed to open video",
+        ))
+    })?;
+
+    let input = ictx.streams().best(Type::Video).ok_or_else(|| {
+        image::ImageError::Decoding(image::error::DecodingError::new(
+            image::error::ImageFormatHint::Unknown,
+            "No video stream found",
+        ))
+    })?;
+
+    let video_stream_index = input.index();
+    let codec_params = input.parameters();
+    let context = codec::Context::from_parameters(codec_params).map_err(|_| {
+        image::ImageError::Decoding(image::error::DecodingError::new(
+            image::error::ImageFormatHint::Unknown,
+            "Failed to get codec context",
+        ))
+    })?;
+    let mut decoder = context.decoder().video().map_err(|_| {
+        image::ImageError::Decoding(image::error::DecodingError::new(
+            image::error::ImageFormatHint::Unknown,
+            "Failed to get video decoder",
+        ))
+    })?;
+
+    let mut scaler = ScalingContext::get(
+        decoder.format(),
+        decoder.width(),
+        decoder.height(),
+        Pixel::RGB24,
+        decoder.width(),
+        decoder.height(),
+        scaling::Flags::BILINEAR,
+    )
+    .unwrap();
+
+    for (stream, packet) in ictx.packets() {
+        if stream.index() == video_stream_index {
+            decoder.send_packet(&packet).ok();
+
+            let mut decoded = Video::empty();
+            while decoder.receive_frame(&mut decoded).is_ok() {
+                let mut rgb_frame = Video::empty();
+                scaler.run(&decoded, &mut rgb_frame).unwrap();
+                let width = rgb_frame.width();
+                let height = rgb_frame.height();
+                let data = rgb_frame.data(0);
+                let image_buffer = image::RgbImage::from_raw(width, height, data.to_vec())
+                    .ok_or_else(|| {
+                        image::ImageError::Limits(image::error::LimitError::from_kind(
+                            image::error::LimitErrorKind::DimensionError,
+                        ))
+                    })?;
+                return Ok(DynamicImage::ImageRgb8(image_buffer));
+            }
+        }
+    }
+
+    Err(image::ImageError::Decoding(
+        image::error::DecodingError::new(
+            image::error::ImageFormatHint::Unknown,
+            "No frame extracted",
+        ),
+    ))
 }
 
 #[derive(Parser)]
