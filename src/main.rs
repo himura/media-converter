@@ -6,10 +6,6 @@ use actix_web::{
     ResponseError,
 };
 use clap::Parser;
-use ffmpeg_next::{
-    codec, format, frame::Video, media::Type, software::scaling,
-    software::scaling::context::Context as ScalingContext, util::format::pixel::Pixel,
-};
 use image::error::ImageError;
 use image::{ColorType, DynamicImage};
 use psd::Psd;
@@ -18,6 +14,7 @@ use std::fmt::Debug;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use webp::Encoder;
+mod movie_keyframe;
 
 #[derive(Debug)]
 enum Size {
@@ -57,6 +54,9 @@ pub enum ApiError {
 
     #[error("Failed to encode: err={0}")]
     FailedToEncode(String),
+
+    #[error("Failed to encode: err={0}")]
+    FailedToDecodeMovie(anyhow::Error),
 }
 
 impl ResponseError for ApiError {
@@ -66,6 +66,7 @@ impl ResponseError for ApiError {
             ApiError::InvalidKey(_) => StatusCode::NOT_FOUND,
             ApiError::FailedToDecode(_) => StatusCode::INTERNAL_SERVER_ERROR,
             ApiError::FailedToEncode(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            ApiError::FailedToDecodeMovie(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 
@@ -148,12 +149,12 @@ async fn media(
         return Ok(HttpResponse::NotModified().finish());
     }
 
-    let img = load_image_handle_api_error(&canonical_path)?;
+    let img = load_image(&canonical_path, &app_data.config.load_image_option)?;
     Ok(build_webp_response(
         img,
         &canonical_path,
         modified_time,
-        app_data.media_quality,
+        app_data.config.media_quality,
     )?)
 }
 
@@ -178,22 +179,18 @@ async fn thumbnail(
         return Ok(HttpResponse::NotModified().finish());
     }
 
-    let img = load_image_handle_api_error(&canonical_path)?;
+    let img = load_image(&canonical_path, &app_data.config.load_image_option)?;
     let (w, h) = size.dimensions();
     let resized = img.thumbnail(w, h);
     Ok(build_webp_response(
         resized,
         &canonical_path,
         modified_time,
-        app_data.thumbnail_quality,
+        app_data.config.thumbnail_quality,
     )?)
 }
 
-fn load_image_handle_api_error(path: &Path) -> Result<DynamicImage, ApiError> {
-    load_image(path).map_err(ApiError::FailedToDecode)
-}
-
-fn load_image(path: &Path) -> Result<DynamicImage, ImageError> {
+fn load_image(path: &Path, option: &LoadImageOption) -> Result<DynamicImage, ApiError> {
     let ext = path
         .extension()
         .and_then(OsStr::to_str)
@@ -201,9 +198,14 @@ fn load_image(path: &Path) -> Result<DynamicImage, ImageError> {
         .to_lowercase();
 
     match ext.as_str() {
-        "psd" => load_image_from_psd(path),
-        "mp4" | "webm" | "mov" => load_image_from_movie_keyframe(path),
-        _ => load_image_from_file(path),
+        "psd" => load_image_from_psd(path).map_err(ApiError::FailedToDecode),
+        "mp4" | "webm" | "mov" => movie_keyframe::load_image_from_movie_keyframe(
+            path,
+            option.movie_max_frames,
+            option.movie_frame_score_threshold,
+        )
+        .map_err(ApiError::FailedToDecodeMovie),
+        _ => load_image_from_file(path).map_err(ApiError::FailedToDecode),
     }
 }
 
@@ -231,88 +233,6 @@ fn load_image_from_psd(path: &Path) -> Result<DynamicImage, ImageError> {
             ))
         })?;
     Ok(DynamicImage::ImageRgba8(img_buf))
-}
-
-fn load_image_from_movie_keyframe(path: &Path) -> Result<DynamicImage, ImageError> {
-    ffmpeg_next::init().ok(); // すでに初期化済なら何もしない
-
-    let mut ictx = format::input(&path).map_err(|_| {
-        image::ImageError::Decoding(image::error::DecodingError::new(
-            image::error::ImageFormatHint::Unknown,
-            "Failed to open video",
-        ))
-    })?;
-
-    let input = ictx.streams().best(Type::Video).ok_or_else(|| {
-        image::ImageError::Decoding(image::error::DecodingError::new(
-            image::error::ImageFormatHint::Unknown,
-            "No video stream found",
-        ))
-    })?;
-
-    let video_stream_index = input.index();
-    let codec_params = input.parameters();
-    let context = codec::Context::from_parameters(codec_params).map_err(|_| {
-        image::ImageError::Decoding(image::error::DecodingError::new(
-            image::error::ImageFormatHint::Unknown,
-            "Failed to get codec context",
-        ))
-    })?;
-    let mut decoder = context.decoder().video().map_err(|_| {
-        image::ImageError::Decoding(image::error::DecodingError::new(
-            image::error::ImageFormatHint::Unknown,
-            "Failed to get video decoder",
-        ))
-    })?;
-
-    let mut scaler = ScalingContext::get(
-        decoder.format(),
-        decoder.width(),
-        decoder.height(),
-        Pixel::RGB24,
-        decoder.width(),
-        decoder.height(),
-        scaling::Flags::BILINEAR,
-    )
-    .unwrap();
-
-    for (stream, packet) in ictx.packets() {
-        if stream.index() == video_stream_index {
-            decoder.send_packet(&packet).ok();
-
-            let mut decoded = Video::empty();
-            while decoder.receive_frame(&mut decoded).is_ok() {
-                let mut rgb_frame = Video::empty();
-                scaler.run(&decoded, &mut rgb_frame).unwrap();
-
-                let width = rgb_frame.width() as usize;
-                let height = rgb_frame.height() as usize;
-                let stride = rgb_frame.stride(0);
-                let data = rgb_frame.data(0);
-
-                let mut buffer = Vec::with_capacity(width * height * 3);
-                for y in 0..height {
-                    let row_start = y * stride;
-                    buffer.extend_from_slice(&data[row_start..row_start + width * 3]);
-                }
-
-                let image_buffer = image::RgbImage::from_raw(width as u32, height as u32, buffer)
-                    .ok_or_else(|| {
-                    image::ImageError::Limits(image::error::LimitError::from_kind(
-                        image::error::LimitErrorKind::DimensionError,
-                    ))
-                })?;
-                return Ok(DynamicImage::ImageRgb8(image_buffer));
-            }
-        }
-    }
-
-    Err(image::ImageError::Decoding(
-        image::error::DecodingError::new(
-            image::error::ImageFormatHint::Unknown,
-            "No frame extracted",
-        ),
-    ))
 }
 
 fn build_webp_response(
@@ -354,27 +274,43 @@ fn build_webp_response(
 #[command(name = "media-thumb-server")]
 #[command(about = "Serve thumbnails from NAS")]
 struct Args {
-    /// Base path to the NAS media directory
-    #[arg(long)]
-    base_path: PathBuf,
-
     #[arg(long, default_value = "127.0.0.1")]
     bind: String,
 
     #[arg(short, long, default_value_t = 8080)]
     port: u16,
 
+    #[arg(long)]
+    base_path: PathBuf,
+
+    #[command(flatten)]
+    config: AppConfig,
+}
+
+#[derive(Parser)]
+struct AppConfig {
     #[arg(short, long, default_value_t = 95.0)]
     thumbnail_quality: f32,
 
     #[arg(short, long, default_value_t = 97.0)]
     media_quality: f32,
+
+    #[command(flatten)]
+    load_image_option: LoadImageOption,
+}
+
+#[derive(Parser)]
+struct LoadImageOption {
+    #[arg(short, long, default_value_t = 30)]
+    movie_max_frames: i32,
+
+    #[arg(short, long, default_value_t = 30.0)]
+    movie_frame_score_threshold: f32,
 }
 
 struct AppData {
     base_path: PathBuf,
-    thumbnail_quality: f32,
-    media_quality: f32,
+    config: AppConfig,
 }
 
 #[actix_web::main]
@@ -385,8 +321,7 @@ async fn main() -> std::io::Result<()> {
     let base_path = args.base_path.canonicalize().expect("Invalid base path");
     let app_data = web::Data::new(AppData {
         base_path,
-        thumbnail_quality: args.thumbnail_quality,
-        media_quality: args.media_quality,
+        config: args.config,
     });
 
     log::info!("Starting HTTP server at http://{}:{}", args.bind, args.port);

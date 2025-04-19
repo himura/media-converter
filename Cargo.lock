@@ -1482,6 +1482,7 @@ dependencies = [
  "image",
  "log",
  "psd",
+ "scopeguard",
  "serde",
  "thiserror 2.0.12",
  "webp",
