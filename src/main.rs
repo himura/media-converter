@@ -1,14 +1,22 @@
-use actix_web::http::header::{CACHE_CONTROL, IF_MODIFIED_SINCE, LAST_MODIFIED};
+use actix_files as fs;
+use actix_web::http::header::{
+    ContentDisposition, DispositionType, CACHE_CONTROL, IF_MODIFIED_SINCE, LAST_MODIFIED,
+};
+use actix_web::http::StatusCode;
 use actix_web::{
-    get, middleware::Logger, web, App, HttpRequest, HttpResponse, HttpServer, Responder,
+    get, middleware::Logger, web, App, Error, HttpRequest, HttpResponse, HttpServer, Responder,
+    ResponseError,
 };
 use clap::Parser;
 use httpdate::HttpDate;
+use image::error::ImageError;
 use image::io::Reader as ImageReader;
 use image::{DynamicImage, ImageOutputFormat};
 use psd::Psd;
+use std::ffi::OsStr;
+use std::fmt::Debug;
 use std::io::Cursor;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 #[derive(Debug)]
@@ -36,31 +44,107 @@ impl Size {
     }
 }
 
-#[get("/thumbnail/{tail:.*}")]
-async fn thumbnail(
+#[derive(Debug, thiserror::Error)]
+pub enum ApiError {
+    #[error("not found")]
+    NotFound(),
+
+    #[error("malformed key {0}")]
+    InvalidKey(String),
+
+    #[error("Failed to decode: err={0}")]
+    FailedToDecode(ImageError),
+
+    #[error("Failed to encode: err={0}")]
+    FailedToEncode(ImageError),
+}
+
+impl ResponseError for ApiError {
+    fn status_code(&self) -> actix_web::http::StatusCode {
+        match self {
+            ApiError::NotFound() => StatusCode::NOT_FOUND,
+            ApiError::InvalidKey(_) => StatusCode::NOT_FOUND,
+            ApiError::FailedToDecode(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            ApiError::FailedToEncode(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+
+    fn error_response(&self) -> HttpResponse {
+        HttpResponse::build(self.status_code()).finish()
+        // let response_body = match self {
+        //     AppError::NotFound() => {
+        //         serde_json::json!(errors)
+        //     }
+        // };
+        // HttpResponseBuilder::new(self.status_code()).json(response_body)
+    }
+}
+
+fn path_from_key(base_path: &Path, key: &str) -> Result<std::path::PathBuf, ApiError> {
+    let (hkey, ext) = key.split_once('.').unwrap_or((key, ""));
+    if hkey.len() != 32 {
+        log::debug!("Malformed hash key {}", hkey);
+        return Err(ApiError::InvalidKey(key.to_string()));
+    }
+    if !ext.chars().all(|c| c.is_ascii_alphanumeric()) {
+        log::debug!("Malformed ext: key={}, ext={}", key, ext);
+        return Err(ApiError::InvalidKey(key.to_string()));
+    }
+
+    if !hkey.chars().all(|c| c.is_ascii_hexdigit()) {
+        log::debug!("Malformed hash key {}", hkey);
+        return Err(ApiError::InvalidKey(key.to_string()));
+    }
+
+    let prefix = hkey.get(0..2).unwrap();
+    let mut path = PathBuf::from(base_path);
+    path.push(prefix);
+    path.push(key);
+
+    Ok(path)
+}
+
+fn is_not_modified(req: &HttpRequest, modified_time: SystemTime) -> bool {
+    if let Some(ims) = req.headers().get(IF_MODIFIED_SINCE) {
+        if let Ok(ims_str) = ims.to_str() {
+            if let Ok(ims_time) = httpdate::parse_http_date(ims_str) {
+                return modified_time <= ims_time;
+            }
+        }
+    }
+    return false;
+}
+
+#[get("/raw/{tail:.*}")]
+async fn original(
+    _req: HttpRequest,
+    path: web::Path<String>,
+    base_path: web::Data<std::path::PathBuf>,
+) -> Result<fs::NamedFile, Error> {
+    let canonical_path = path_from_key(base_path.get_ref(), &path.into_inner())?;
+
+    let named_file = fs::NamedFile::open(canonical_path)?;
+    Ok(named_file
+        .use_last_modified(true)
+        .set_content_disposition(ContentDisposition {
+            disposition: DispositionType::Attachment,
+            parameters: vec![],
+        }))
+}
+
+#[get("/media/{tail:.*}")]
+async fn media(
     req: HttpRequest,
     path: web::Path<String>,
-    query: web::Query<std::collections::HashMap<String, String>>,
     base_path: web::Data<std::path::PathBuf>,
 ) -> impl Responder {
-    let rel_path = path.into_inner();
-    let size = query
-        .get("size")
-        .map(|s| Size::from_str(s))
-        .unwrap_or(Size::Medium);
-
-    let full_path = base_path.join(&rel_path);
-
-    // パストラバーサル防止
-    let canonical_base = base_path;
-    let canonical_path = match std::fs::canonicalize(&full_path) {
+    let canonical_path = match path_from_key(base_path.get_ref(), &path.into_inner()) {
         Ok(p) => p,
-        Err(_) => return HttpResponse::NotFound().body("File not found"),
+        Err(err) => {
+            log::warn!("Mulformed path: err={}", err);
+            return HttpResponse::NotFound().body("File not found");
+        }
     };
-
-    if !canonical_path.starts_with(&**canonical_base) {
-        return HttpResponse::Forbidden().body("Access denied");
-    }
 
     // ファイルの最終更新日時
     let metadata = match std::fs::metadata(&canonical_path) {
@@ -69,71 +153,70 @@ async fn thumbnail(
     };
 
     let modified_time = metadata.modified().unwrap_or(SystemTime::now());
-
-    // If-Modified-Since ヘッダ処理
-    if let Some(ims) = req.headers().get(IF_MODIFIED_SINCE) {
-        if let Ok(ims_str) = ims.to_str() {
-            if let Ok(ims_time) = httpdate::parse_http_date(ims_str) {
-                if modified_time <= ims_time {
-                    return HttpResponse::NotModified().finish();
-                }
-            }
-        }
+    if is_not_modified(&req, modified_time) {
+        return HttpResponse::NotModified().finish();
     }
 
-    let extension = canonical_path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .unwrap_or("")
-        .to_lowercase();
-
-    let img_result = match extension.as_str() {
-        "psd" => {
-            // PSD 読み込み＆プレビュー画像取得
-            match std::fs::read(&canonical_path) {
-                Ok(bytes) => match Psd::from_bytes(&bytes) {
-                    Ok(psd) => {
-                        let rgba = psd.rgba();
-                        let width = psd.width();
-                        let height = psd.height();
-                        // RGBA を ImageBuffer に変換
-                        let img_buf = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(
-                            width,
-                            height,
-                            rgba.to_vec(),
-                        );
-                        img_buf.map(DynamicImage::ImageRgba8).ok_or_else(|| {
-                            image::ImageError::Limits(image::error::LimitError::from_kind(
-                                image::error::LimitErrorKind::DimensionError,
-                            ))
-                        })
-                    }
-                    Err(_) => Err(image::ImageError::Decoding(
-                        image::error::DecodingError::new(
-                            image::error::ImageFormatHint::Unknown,
-                            "Failed to parse PSD",
-                        ),
-                    )),
-                },
-                Err(_) => Err(image::ImageError::IoError(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "Failed to read PSD file",
-                ))),
-            }
-        }
-        _ => {
-            // 通常画像 (JPEG/PNG/WEBP など)
-            match ImageReader::open(&canonical_path) {
-                Ok(img_reader) => img_reader.decode(),
-                Err(err) => Err(image::ImageError::IoError(err)),
-            }
+    let img = match load_image(&canonical_path) {
+        Ok(img) => img,
+        Err(err) => {
+            log::warn!("Failed to decode image: {}", err);
+            return HttpResponse::InternalServerError().body("Failed to decode image");
         }
     };
 
-    let resized = match img_result {
-        Ok(mut img) => resize_image(&mut img, size),
-        Err(_) => return HttpResponse::InternalServerError().body("Failed to decode image"),
+    let mut buffer = Cursor::new(Vec::new());
+    if let Err(_) = img.write_to(&mut buffer, ImageOutputFormat::WebP) {
+        return HttpResponse::InternalServerError().body("Failed to encode image");
+    }
+
+    return HttpResponse::Ok()
+        .content_type("image/webp")
+        .insert_header((CACHE_CONTROL, "public, max-age=2592000"))
+        .insert_header((LAST_MODIFIED, HttpDate::from(modified_time).to_string()))
+        .body(buffer.into_inner());
+}
+
+#[get("/thumbnail/{tail:.*}")]
+async fn thumbnail(
+    req: HttpRequest,
+    path: web::Path<String>,
+    query: web::Query<std::collections::HashMap<String, String>>,
+    base_path: web::Data<std::path::PathBuf>,
+) -> impl Responder {
+    let size = query
+        .get("size")
+        .map(|s| Size::from_str(s))
+        .unwrap_or(Size::Medium);
+    let canonical_path = match path_from_key(base_path.get_ref(), &path.into_inner()) {
+        Ok(p) => p,
+        Err(err) => {
+            log::warn!("Mulformed path: err={}", err);
+            return HttpResponse::NotFound().body("File not found");
+        }
     };
+
+    // ファイルの最終更新日時
+    let metadata = match std::fs::metadata(&canonical_path) {
+        Ok(meta) => meta,
+        Err(_) => return HttpResponse::InternalServerError().body("Failed to read metadata"),
+    };
+
+    let modified_time = metadata.modified().unwrap_or(SystemTime::now());
+    if is_not_modified(&req, modified_time) {
+        return HttpResponse::NotModified().finish();
+    }
+
+    let img = match load_image(&canonical_path) {
+        Ok(img) => img,
+        Err(err) => {
+            log::warn!("Failed to decode image: {}", err);
+            return HttpResponse::InternalServerError().body("Failed to decode image");
+        }
+    };
+
+    let (w, h) = size.dimensions();
+    let resized = img.thumbnail(w, h);
 
     let mut buffer = Cursor::new(Vec::new());
     if let Err(_) = resized.write_to(&mut buffer, ImageOutputFormat::WebP) {
@@ -147,9 +230,43 @@ async fn thumbnail(
         .body(buffer.into_inner());
 }
 
-fn resize_image(img: &mut DynamicImage, size: Size) -> DynamicImage {
-    let (w, h) = size.dimensions();
-    img.thumbnail(w, h)
+fn load_image(path: &Path) -> Result<DynamicImage, ImageError> {
+    let ext = path
+        .extension()
+        .and_then(OsStr::to_str)
+        .unwrap_or("")
+        .to_lowercase();
+
+    match ext.as_str() {
+        "psd" => return load_image_from_psd(path),
+        _ => return load_image_from_file(path),
+    }
+}
+
+fn load_image_from_file(path: &Path) -> Result<DynamicImage, ImageError> {
+    ImageReader::open(&path)?.decode()
+}
+
+fn load_image_from_psd(path: &Path) -> Result<DynamicImage, ImageError> {
+    let bytes = std::fs::read(&path)?;
+    let psd = Psd::from_bytes(&bytes).map_err(|err| {
+        image::ImageError::Decoding(image::error::DecodingError::new(
+            image::error::ImageFormatHint::Unknown,
+            format!("Failed to parse PSD: {}", err),
+        ))
+    })?;
+
+    let rgba = psd.rgba();
+    let width = psd.width();
+    let height = psd.height();
+
+    let img_buf = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(width, height, rgba.to_vec())
+        .ok_or_else(|| {
+            image::ImageError::Limits(image::error::LimitError::from_kind(
+                image::error::LimitErrorKind::DimensionError,
+            ))
+        })?;
+    Ok(DynamicImage::ImageRgba8(img_buf))
 }
 
 #[derive(Parser)]
@@ -182,6 +299,8 @@ async fn main() -> std::io::Result<()> {
             .wrap(Logger::default())
             .app_data(web::Data::new(base_path.clone()))
             .service(thumbnail)
+            .service(media)
+            .service(original)
     })
     .bind((args.bind.as_str(), args.port))?
     .run()
