@@ -59,30 +59,32 @@ pub fn load_image_from_movie_keyframe(
 
         let mut decoded = FfmpegFrame::empty();
         while decoder.receive_frame(&mut decoded).is_ok() {
-            let mut rgb_frame = FfmpegFrame::empty();
-            scaler.run(&decoded, &mut rgb_frame)?;
+            if decoded.is_key() {
+                let mut rgb_frame = FfmpegFrame::empty();
+                scaler.run(&decoded, &mut rgb_frame)?;
 
-            let image = frame_to_dynamic_image(&rgb_frame)?;
-            let score = compute_frame_score(&image);
-            log::debug!(
-                "{}[{}]: Frame score: {}",
-                path.display(),
-                frame_index,
-                score
-            );
+                let image = frame_to_dynamic_image(&rgb_frame)?;
+                let score = compute_frame_score(&image);
+                log::debug!(
+                    "{}[{}]: Frame score: {}",
+                    path.display(),
+                    frame_index,
+                    score
+                );
 
-            if score >= threshold_score {
-                return Ok(image);
-            }
+                if score >= threshold_score {
+                    return Ok(image);
+                }
 
-            if score > best_score {
-                best_score = score;
-                best_frame = Some(image);
-            }
+                if score > best_score {
+                    best_score = score;
+                    best_frame = Some(image);
+                }
 
-            frame_index += 1;
-            if frame_index >= max_frames {
-                break;
+                frame_index += 1;
+                if frame_index >= max_frames {
+                    break;
+                }
             }
         }
 
