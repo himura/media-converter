@@ -18,3 +18,5 @@ serde = { version = "1.0", features = ["derive"] }
 thiserror = "2.0.12"
 ffmpeg-next = "7.1.0"
 webp = "0.3.0"
+scopeguard = "1.2.0"
+imageproc = "0.25.0"
