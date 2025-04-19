@@ -5,7 +5,8 @@ use ffmpeg::format::input;
 use ffmpeg::software::scaling::{context::Context as ScalingContext, flag::Flags};
 use ffmpeg::util::frame::video::Video as FfmpegFrame;
 use ffmpeg_next as ffmpeg;
-use image::{DynamicImage, ImageBuffer, Rgb};
+use image::{DynamicImage, GrayImage, ImageBuffer, Rgb};
+use imageproc;
 use scopeguard::guard;
 use std::path::Path;
 
@@ -135,5 +136,22 @@ fn compute_frame_score(image: &DynamicImage) -> f32 {
     }
 
     let brightness_penalty = 1.0 - ((brightness_stats.mean() - 128.0).abs() / 128.0);
-    (brightness_stats.stddev() * saturation_stats.mean() * brightness_penalty) as f32
+
+    let sharpness = compute_sharpness(image) / 1000.0;
+
+    (brightness_stats.stddev() * saturation_stats.mean() * brightness_penalty * sharpness) as f32
+}
+
+fn compute_sharpness(image: &DynamicImage) -> f64 {
+    let gray: GrayImage = image.to_luma8();
+
+    let lap = imageproc::filter::laplacian_filter(&gray);
+
+    let mut stats = statistics::OnlineStats::new();
+    for pixel in lap.pixels() {
+        let v = pixel[0] as f64;
+        stats.update(v);
+    }
+
+    stats.variance()
 }
