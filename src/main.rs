@@ -204,6 +204,7 @@ fn load_image(path: &Path, option: &LoadImageOption) -> Result<DynamicImage, Api
             path,
             option.movie_max_frames,
             option.movie_frame_score_threshold,
+            option.movie_frame_sharpness_threshold,
         )
         .map_err(ApiError::FailedToDecodeMovie),
         _ => load_image_from_file(path).map_err(ApiError::FailedToDecode),
@@ -307,6 +308,9 @@ struct LoadImageOption {
 
     #[arg(short, long, default_value_t = 30.0)]
     movie_frame_score_threshold: f32,
+
+    #[arg(short, long)]
+    movie_frame_sharpness_threshold: Option<f32>,
 }
 
 struct AppData {

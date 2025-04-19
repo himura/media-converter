@@ -6,7 +6,6 @@ use ffmpeg::software::scaling::{context::Context as ScalingContext, flag::Flags}
 use ffmpeg::util::frame::video::Video as FfmpegFrame;
 use ffmpeg_next as ffmpeg;
 use image::{DynamicImage, GrayImage, ImageBuffer, Rgb};
-use imageproc;
 use scopeguard::guard;
 use std::path::Path;
 
@@ -14,6 +13,7 @@ pub fn load_image_from_movie_keyframe(
     path: &Path,
     max_frames: i32,
     threshold_score: f32,
+    threshold_sharpness: Option<f32>,
 ) -> Result<DynamicImage, anyhow::Error> {
     ffmpeg::init().ok(); // Ignore re-init
 
@@ -73,7 +73,20 @@ pub fn load_image_from_movie_keyframe(
                 );
 
                 if score >= threshold_score {
-                    return Ok(image);
+                    if let Some(threshold) = threshold_sharpness {
+                        let sharpness = compute_frame_sharpness(&image) as f32;
+                        log::debug!(
+                            "{}[{}]: Frame sharpness: {}",
+                            path.display(),
+                            frame_index,
+                            sharpness
+                        );
+                        if sharpness >= threshold {
+                            return Ok(image);
+                        }
+                    } else {
+                        return Ok(image);
+                    }
                 }
 
                 if score > best_score {
@@ -139,12 +152,10 @@ fn compute_frame_score(image: &DynamicImage) -> f32 {
 
     let brightness_penalty = 1.0 - ((brightness_stats.mean() - 128.0).abs() / 128.0);
 
-    let sharpness = compute_sharpness(image) / 1000.0;
-
-    (brightness_stats.stddev() * saturation_stats.mean() * brightness_penalty * sharpness) as f32
+    (brightness_stats.stddev() * saturation_stats.mean() * brightness_penalty) as f32
 }
 
-fn compute_sharpness(image: &DynamicImage) -> f64 {
+fn compute_frame_sharpness(image: &DynamicImage) -> f64 {
     let gray: GrayImage = image.to_luma8();
 
     let lap = imageproc::filter::laplacian_filter(&gray);
