@@ -202,7 +202,7 @@ fn load_image(path: &Path, option: &LoadImageOption) -> Result<DynamicImage, Api
         "psd" => load_image_from_psd(path).map_err(ApiError::FailedToDecode),
         "mp4" | "webm" | "mov" => movie_keyframe::load_image_from_movie_keyframe(
             path,
-            option.movie_max_frames,
+            option.movie_max_keyframes,
             option.movie_frame_score_threshold,
             option.movie_frame_sharpness_threshold,
         )
@@ -303,10 +303,10 @@ struct AppConfig {
 
 #[derive(Parser)]
 struct LoadImageOption {
-    #[arg(short, long, default_value_t = 30)]
-    movie_max_frames: i32,
+    #[arg(short, long, default_value_t = 10)]
+    movie_max_keyframes: i32,
 
-    #[arg(short, long, default_value_t = 30.0)]
+    #[arg(short, long, default_value_t = 1.0)]
     movie_frame_score_threshold: f32,
 
     #[arg(short, long)]

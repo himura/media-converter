@@ -11,7 +11,7 @@ use std::path::Path;
 
 pub fn load_image_from_movie_keyframe(
     path: &Path,
-    max_frames: i32,
+    max_keyframes: i32,
     threshold_score: f32,
     threshold_sharpness: Option<f32>,
 ) -> Result<DynamicImage, anyhow::Error> {
@@ -95,13 +95,13 @@ pub fn load_image_from_movie_keyframe(
                 }
 
                 frame_index += 1;
-                if frame_index >= max_frames {
+                if frame_index >= max_keyframes {
                     break;
                 }
             }
         }
 
-        if frame_index >= max_frames {
+        if frame_index >= max_keyframes {
             break;
         }
     }
