@@ -1,3 +1,4 @@
+use crate::statistics;
 use anyhow::{Context, Result};
 use ffmpeg::codec;
 use ffmpeg::format::input;
@@ -112,19 +113,27 @@ fn frame_to_dynamic_image(frame: &FfmpegFrame) -> Result<DynamicImage, anyhow::E
 
 fn compute_frame_score(image: &DynamicImage) -> f32 {
     let rgb = image.to_rgb8();
-    let mut brightness = Vec::with_capacity((rgb.width() * rgb.height()) as usize);
+    let mut brightness_stats = statistics::OnlineStats::new();
+    let mut saturation_stats = statistics::OnlineStats::new();
 
     for pixel in rgb.pixels() {
         let [r, g, b] = pixel.0;
-        let luma = 0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32;
-        brightness.push(luma);
+
+        // 明度 (Luma: Y)
+        // TODO: HSV の V で良い説
+        let luma = 0.299 * r as f64 + 0.587 * g as f64 + 0.114 * b as f64;
+        brightness_stats.update(luma);
+
+        // 彩度 (HSV の S)
+        let rf = r as f64 / 255.0;
+        let gf = g as f64 / 255.0;
+        let bf = b as f64 / 255.0;
+        let max = rf.max(gf).max(bf);
+        let min = rf.min(gf).min(bf);
+        let saturation = if max == 0.0 { 0.0 } else { (max - min) / max };
+        saturation_stats.update(saturation);
     }
 
-    let mean = brightness.iter().sum::<f32>() / brightness.len() as f32;
-    let stddev = (brightness.iter().map(|v| (v - mean).powi(2)).sum::<f32>()
-        / brightness.len() as f32)
-        .sqrt();
-
-    // スコア: 平均輝度が極端でなく、分散がある（情報量がある）画像を評価
-    stddev * (1.0 - (mean - 128.0).abs() / 128.0)
+    let brightness_penalty = 1.0 - ((brightness_stats.mean() - 128.0).abs() / 128.0);
+    (brightness_stats.stddev() * saturation_stats.mean() * brightness_penalty) as f32
 }

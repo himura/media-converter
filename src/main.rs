@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use webp::Encoder;
 mod movie_keyframe;
+mod statistics;
 
 #[derive(Debug)]
 enum Size {
