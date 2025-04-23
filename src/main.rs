@@ -2,8 +2,8 @@ use actix_files as fs;
 use actix_web::http::header;
 use actix_web::http::StatusCode;
 use actix_web::{
-    get, middleware::Logger, web, App, Error, HttpRequest, HttpResponse, HttpServer, Responder,
-    ResponseError,
+    get, middleware::Logger, web, App, Either, Error, HttpRequest, HttpResponse, HttpServer,
+    Responder, ResponseError,
 };
 use clap::Parser;
 use image::error::ImageError;
@@ -82,28 +82,48 @@ impl ResponseError for ApiError {
     }
 }
 
-fn path_from_key(base_path: &Path, key: &str) -> Result<std::path::PathBuf, ApiError> {
-    let (hkey, ext) = key.split_once('.').unwrap_or((key, ""));
-    if hkey.len() != 32 {
-        log::debug!("Malformed hash key {}", hkey);
-        return Err(ApiError::InvalidKey(key.to_string()));
-    }
-    if !ext.chars().all(|c| c.is_ascii_alphanumeric()) {
-        log::debug!("Malformed ext: key={}, ext={}", key, ext);
-        return Err(ApiError::InvalidKey(key.to_string()));
+pub struct FileKey {
+    hkey: String,
+    ext: String,
+}
+
+impl FileKey {
+    pub fn parse(key_impl: impl Into<String>) -> Result<FileKey, ApiError> {
+        let key: String = key_impl.into();
+        let (hkey, ext) = key.split_once('.').unwrap_or((&key, ""));
+        if hkey.len() != 32 {
+            log::debug!("Malformed hash key {}", hkey);
+            return Err(ApiError::InvalidKey(key));
+        }
+        if !ext.chars().all(|c| c.is_ascii_alphanumeric()) {
+            log::debug!("Malformed ext: key={}, ext={}", key, ext);
+            return Err(ApiError::InvalidKey(key));
+        }
+
+        if !hkey.chars().all(|c| c.is_ascii_hexdigit()) {
+            log::debug!("Malformed hash key {}", hkey);
+            return Err(ApiError::InvalidKey(key));
+        }
+
+        Ok(FileKey {
+            hkey: hkey.to_string(),
+            ext: ext.to_string(),
+        })
     }
 
-    if !hkey.chars().all(|c| c.is_ascii_hexdigit()) {
-        log::debug!("Malformed hash key {}", hkey);
-        return Err(ApiError::InvalidKey(key.to_string()));
+    pub fn build_filename(&self) -> PathBuf {
+        let mut path = PathBuf::from(&self.hkey);
+        path.set_extension(&self.ext);
+        path
     }
 
-    let prefix = hkey.get(0..2).unwrap();
-    let mut path = PathBuf::from(base_path);
-    path.push(prefix);
-    path.push(key);
-
-    Ok(path)
+    pub fn build_path(&self, base_path: &Path) -> std::path::PathBuf {
+        let prefix = self.hkey.get(0..2).unwrap();
+        let mut path = PathBuf::from(base_path);
+        path.push(prefix);
+        path.push(self.build_filename());
+        path
+    }
 }
 
 fn is_not_modified(req: &HttpRequest, modified_time: SystemTime) -> bool {
@@ -117,15 +137,8 @@ fn is_not_modified(req: &HttpRequest, modified_time: SystemTime) -> bool {
     false
 }
 
-#[get("/raw/{tail:.*}")]
-async fn original(
-    _req: HttpRequest,
-    path: web::Path<String>,
-    app_data: web::Data<AppData>,
-) -> Result<fs::NamedFile, Error> {
-    let canonical_path = path_from_key(app_data.base_path.as_path(), &path.into_inner())?;
-
-    let named_file = fs::NamedFile::open(canonical_path)?;
+fn passthrough_file(path: &Path) -> Result<fs::NamedFile, Error> {
+    let named_file = fs::NamedFile::open(path)?;
     Ok(named_file
         .use_last_modified(true)
         .set_content_disposition(header::ContentDisposition {
@@ -134,29 +147,50 @@ async fn original(
         }))
 }
 
+#[get("/raw/{tail:.*}")]
+async fn original(
+    _req: HttpRequest,
+    path: web::Path<String>,
+    app_data: web::Data<AppData>,
+) -> Result<fs::NamedFile, Error> {
+    let key = FileKey::parse(path.into_inner())?;
+    let canonical_path = key.build_path(app_data.base_path.as_path());
+    passthrough_file(&canonical_path)
+}
+
 #[get("/media/{tail:.*}")]
 async fn media(
     req: HttpRequest,
     path: web::Path<String>,
     app_data: web::Data<AppData>,
-) -> Result<impl Responder, Error> {
-    let canonical_path = path_from_key(app_data.base_path.as_path(), &path.into_inner())?;
+) -> Result<Either<fs::NamedFile, HttpResponse>, Error> {
+    let key = FileKey::parse(path.into_inner())?;
+    let canonical_path = key.build_path(app_data.base_path.as_path());
+
+    if key.ext == "gif" || key.ext == "avif" || key.ext == "webp" {
+        return passthrough_file(&canonical_path).map(Either::Left);
+    }
 
     // Check Last Modified header
-    let modified_time = std::fs::metadata(&canonical_path)?
-        .modified()
-        .unwrap_or(SystemTime::now());
+    let metadata = std::fs::metadata(&canonical_path)?;
+    let modified_time = metadata.modified().unwrap_or(SystemTime::now());
     if is_not_modified(&req, modified_time) {
-        return Ok(HttpResponse::NotModified().finish());
+        return Ok(Either::Right(HttpResponse::NotModified().finish()));
+    }
+
+    if let Some(threshold) = app_data.config.media_passthrough_max_bytes {
+        if metadata.len() <= threshold {
+            return passthrough_file(&canonical_path).map(Either::Left);
+        }
     }
 
     let img = load_image(&canonical_path, &app_data.config.load_image_option)?;
-    Ok(build_webp_response(
+    Ok(Either::Right(build_webp_response(
         img,
         &canonical_path,
         modified_time,
         app_data.config.media_quality,
-    )?)
+    )?))
 }
 
 #[get("/thumbnail/{tail:.*}")]
@@ -170,7 +204,8 @@ async fn thumbnail(
         .get("size")
         .map(|s| Size::from_str(s))
         .unwrap_or(Size::Medium);
-    let canonical_path = path_from_key(app_data.base_path.as_path(), &path.into_inner())?;
+    let key = FileKey::parse(path.into_inner())?;
+    let canonical_path = key.build_path(app_data.base_path.as_path());
 
     // Check Last Modified header
     let modified_time = std::fs::metadata(&canonical_path)?
@@ -269,7 +304,7 @@ fn build_webp_response(
             header::CacheDirective::MaxAge(2592000u32),
         ]))
         .insert_header(header::LastModified(modified_time.into()))
-        .body(webp_data.to_vec()))
+        .body(webp_data.to_vec())) // copy
 }
 
 #[derive(Parser)]
@@ -296,6 +331,9 @@ struct AppConfig {
 
     #[arg(short, long, default_value_t = 97.0)]
     media_quality: f32,
+
+    #[arg(long)]
+    media_passthrough_max_bytes: Option<u64>,
 
     #[command(flatten)]
     load_image_option: LoadImageOption,
