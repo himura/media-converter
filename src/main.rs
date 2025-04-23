@@ -326,10 +326,10 @@ struct Args {
 
 #[derive(Parser)]
 struct AppConfig {
-    #[arg(short, long, default_value_t = 95.0)]
+    #[arg(short, long, default_value_t = 75.0)]
     thumbnail_quality: f32,
 
-    #[arg(short, long, default_value_t = 97.0)]
+    #[arg(short, long, default_value_t = 75.0)]
     media_quality: f32,
 
     #[arg(long)]
