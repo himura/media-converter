@@ -5,7 +5,7 @@
 Install FFmpeg libraries & clang
 
 ```
-apt install clang libavcodec-dev libavformat-dev libavutil-dev pkg-config
+apt install clang libavcodec-dev libavdevice-dev libavfilter-dev libavformat-dev libavutil-dev pkg-config
 ```
 
 ## Run
