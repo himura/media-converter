@@ -5,7 +5,7 @@
 Install FFmpeg libraries & clang
 
 ```
-apt install clang libavcodec-dev libavdevice-dev libavfilter-dev libavformat-dev libavutil-dev pkg-config
+apt install clang libavcodec-dev libavdevice-dev libavfilter-dev libavformat-dev libavutil-dev libdav1d-dev pkg-config
 ```
 
 ## Run
@@ -22,7 +22,7 @@ cargo run -- --base-path /mnt/nas/media
 ## サポート対象フォーマット
 
 - 静止画
-    - JPEG, PNG, GIF, WebP
+    - JPEG, PNG, GIF, WebP, AVIF
     - PSD：レイヤー統合表示（flatten）にて対応
 - 動画
     - MP4, WebM: スコアベースで適切なキーフレームを抽出

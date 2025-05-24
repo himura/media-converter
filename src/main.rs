@@ -167,7 +167,7 @@ async fn media(
     let key = FileKey::parse(path.into_inner())?;
     let canonical_path = key.build_path(app_data.base_path.as_path());
 
-    if key.ext == "gif" || key.ext == "avif" || key.ext == "webp" {
+    if key.ext == "gif" || key.ext == "webp" {
         return passthrough_file(&canonical_path).map(Either::Left);
     }
 

@@ -5,7 +5,7 @@ edition = '2024'
 
 [dependencies]
 actix-web = "4"
-image = { version = "0.25.6", features = ["webp"] }
+image = { version = "0.25.6", features = ["webp", "avif", "avif-native"] }
 clap = { version = "4", features = ["derive"] }
 chrono = "0.4.40"
 httpdate = "1.0.3"
