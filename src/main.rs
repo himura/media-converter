@@ -1,9 +1,9 @@
 use actix_files as fs;
-use actix_web::http::header;
 use actix_web::http::StatusCode;
+use actix_web::http::header;
 use actix_web::{
-    get, middleware::Logger, web, App, Either, Error, HttpRequest, HttpResponse, HttpServer,
-    Responder, ResponseError,
+    App, Either, Error, HttpRequest, HttpResponse, HttpServer, Responder, ResponseError, get,
+    middleware::Logger, web,
 };
 use clap::Parser;
 use image::error::ImageError;
@@ -137,14 +137,36 @@ fn is_not_modified(req: &HttpRequest, modified_time: SystemTime) -> bool {
     false
 }
 
-fn passthrough_file(path: &Path) -> Result<fs::NamedFile, Error> {
+struct FixedNamedFile(fs::NamedFile);
+
+impl Responder for FixedNamedFile {
+    type Body = actix_web::body::BoxBody;
+
+    fn respond_to(self, req: &HttpRequest) -> HttpResponse<Self::Body> {
+        let mut response = self.0.respond_to(req);
+
+        // Workaround for actix-files bug: Remove incorrect Content-Encoding: identity header
+        // See: https://github.com/actix/actix-web/issues/3191
+        if let Some(encoding) = response.headers().get(header::CONTENT_ENCODING) {
+            if encoding == "identity" {
+                response.headers_mut().remove(header::CONTENT_ENCODING);
+            }
+        }
+
+        response
+    }
+}
+
+fn passthrough_file(path: &Path) -> Result<FixedNamedFile, Error> {
     let named_file = fs::NamedFile::open(path)?;
-    Ok(named_file
-        .use_last_modified(true)
-        .set_content_disposition(header::ContentDisposition {
-            disposition: header::DispositionType::Attachment,
-            parameters: vec![],
-        }))
+    Ok(FixedNamedFile(
+        named_file
+            .use_last_modified(true)
+            .set_content_disposition(header::ContentDisposition {
+                disposition: header::DispositionType::Attachment,
+                parameters: vec![],
+            }),
+    ))
 }
 
 #[get("/raw/{tail:.*}")]
@@ -152,7 +174,7 @@ async fn original(
     _req: HttpRequest,
     path: web::Path<String>,
     app_data: web::Data<AppData>,
-) -> Result<fs::NamedFile, Error> {
+) -> Result<impl Responder, Error> {
     let key = FileKey::parse(path.into_inner())?;
     let canonical_path = key.build_path(app_data.base_path.as_path());
     passthrough_file(&canonical_path)
@@ -163,7 +185,7 @@ async fn media(
     req: HttpRequest,
     path: web::Path<String>,
     app_data: web::Data<AppData>,
-) -> Result<Either<fs::NamedFile, HttpResponse>, Error> {
+) -> Result<Either<FixedNamedFile, HttpResponse>, Error> {
     let key = FileKey::parse(path.into_inner())?;
     let canonical_path = key.build_path(app_data.base_path.as_path());
 
