@@ -207,7 +207,7 @@ async fn media(
 
     if let Some(max_resolution) = app_data.config.media_max_resolution {
         let (w, h) = img.dimensions();
-        let factor = f64::from(w * h) / f64::from(max_resolution);
+        let factor = (f64::from(w) * f64::from(h)) / f64::from(max_resolution);
         if factor > 1.0 {
             let scale = factor.sqrt();
             let nw = max((f64::from(w) / scale).round() as u32, 1);
