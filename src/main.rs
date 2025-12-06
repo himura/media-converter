@@ -10,6 +10,7 @@ use image::error::ImageError;
 use image::imageops::FilterType;
 use image::{ColorType, DynamicImage, GenericImageView};
 use psd::Psd;
+use std::cmp::max;
 use std::ffi::OsStr;
 use std::fmt::Debug;
 use std::path::{Path, PathBuf};
@@ -17,7 +18,6 @@ use std::time::SystemTime;
 use webp::Encoder;
 mod movie_keyframe;
 mod statistics;
-use std::cmp::max;
 
 #[derive(Debug)]
 enum Size {
