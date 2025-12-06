@@ -105,10 +105,7 @@ impl FileKey {
             return Err(ApiError::InvalidKey(key));
         }
 
-        Ok(FileKey {
-            hkey: hkey.to_string(),
-            ext: ext.to_string(),
-        })
+        Ok(FileKey { hkey: hkey.to_string(), ext: ext.to_string() })
     }
 
     pub fn build_filename(&self) -> PathBuf {
@@ -159,14 +156,12 @@ impl Responder for FixedNamedFile {
 
 fn passthrough_file(path: &Path) -> Result<FixedNamedFile, Error> {
     let named_file = fs::NamedFile::open(path)?;
-    Ok(FixedNamedFile(
-        named_file
-            .use_last_modified(true)
-            .set_content_disposition(header::ContentDisposition {
-                disposition: header::DispositionType::Attachment,
-                parameters: vec![],
-            }),
-    ))
+    Ok(FixedNamedFile(named_file.use_last_modified(true).set_content_disposition(
+        header::ContentDisposition {
+            disposition: header::DispositionType::Attachment,
+            parameters: vec![],
+        },
+    )))
 }
 
 #[get("/raw/{tail:.*}")]
@@ -222,17 +217,12 @@ async fn thumbnail(
     query: web::Query<std::collections::HashMap<String, String>>,
     app_data: web::Data<AppData>,
 ) -> Result<impl Responder, Error> {
-    let size = query
-        .get("size")
-        .map(|s| Size::from_str(s))
-        .unwrap_or(Size::Medium);
+    let size = query.get("size").map(|s| Size::from_str(s)).unwrap_or(Size::Medium);
     let key = FileKey::parse(path.into_inner())?;
     let canonical_path = key.build_path(app_data.base_path.as_path());
 
     // Check Last Modified header
-    let modified_time = std::fs::metadata(&canonical_path)?
-        .modified()
-        .unwrap_or(SystemTime::now());
+    let modified_time = std::fs::metadata(&canonical_path)?.modified().unwrap_or(SystemTime::now());
     if is_not_modified(&req, modified_time) {
         return Ok(HttpResponse::NotModified().finish());
     }
@@ -249,11 +239,7 @@ async fn thumbnail(
 }
 
 fn load_image(path: &Path, option: &LoadImageOption) -> Result<DynamicImage, ApiError> {
-    let ext = path
-        .extension()
-        .and_then(OsStr::to_str)
-        .unwrap_or("")
-        .to_lowercase();
+    let ext = path.extension().and_then(OsStr::to_str).unwrap_or("").to_lowercase();
 
     match ext.as_str() {
         "psd" => load_image_from_psd(path).map_err(ApiError::FailedToDecode),
@@ -310,11 +296,7 @@ fn build_webp_response(
     };
 
     let encoder = Encoder::from_image(&rgba8).map_err(|err| {
-        log::warn!(
-            "Failed to encode image: {}:{}",
-            path.to_str().unwrap_or("N/A"),
-            err,
-        );
+        log::warn!("Failed to encode image: {}:{}", path.to_str().unwrap_or("N/A"), err,);
         ApiError::FailedToEncode(err.to_string())
     })?;
     let webp_data = encoder.encode(quality);
@@ -384,10 +366,7 @@ async fn main() -> std::io::Result<()> {
 
     let args = Args::parse();
     let base_path = args.base_path.canonicalize().expect("Invalid base path");
-    let app_data = web::Data::new(AppData {
-        base_path,
-        config: args.config,
-    });
+    let app_data = web::Data::new(AppData { base_path, config: args.config });
 
     log::info!("Starting HTTP server at http://{}:{}", args.bind, args.port);
 
