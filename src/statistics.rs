@@ -24,11 +24,7 @@ impl OnlineStats {
     }
 
     pub fn variance(&self) -> f64 {
-        if self.count > 1 {
-            self.m2 / (self.count as f64 - 1.0)
-        } else {
-            0.0
-        }
+        if self.count > 1 { self.m2 / (self.count as f64 - 1.0) } else { 0.0 }
     }
 
     pub fn stddev(&self) -> f64 {

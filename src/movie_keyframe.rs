@@ -18,10 +18,7 @@ pub fn load_image_from_movie_keyframe(
     ffmpeg::init().ok(); // Ignore re-init
 
     let mut ictx = input(&path)?;
-    let input = ictx
-        .streams()
-        .best(ffmpeg::media::Type::Video)
-        .context("No video stream found")?;
+    let input = ictx.streams().best(ffmpeg::media::Type::Video).context("No video stream found")?;
     let video_stream_index = input.index();
 
     let codec_params = input.parameters();
@@ -65,12 +62,7 @@ pub fn load_image_from_movie_keyframe(
 
                 let image = frame_to_dynamic_image(&rgb_frame)?;
                 let score = compute_frame_score(&image);
-                log::debug!(
-                    "{}[{}]: Frame score: {}",
-                    path.display(),
-                    frame_index,
-                    score
-                );
+                log::debug!("{}[{}]: Frame score: {}", path.display(), frame_index, score);
 
                 if score >= threshold_score {
                     if let Some(threshold) = threshold_sharpness {
