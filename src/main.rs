@@ -7,8 +7,10 @@ use actix_web::{
 };
 use clap::Parser;
 use image::error::ImageError;
-use image::{ColorType, DynamicImage};
+use image::imageops::FilterType;
+use image::{ColorType, DynamicImage, GenericImageView};
 use psd::Psd;
+use std::cmp::max;
 use std::ffi::OsStr;
 use std::fmt::Debug;
 use std::path::{Path, PathBuf};
@@ -201,7 +203,20 @@ async fn media(
         }
     }
 
-    let img = load_image(&canonical_path, &app_data.config.load_image_option)?;
+    let mut img = load_image(&canonical_path, &app_data.config.load_image_option)?;
+
+    if let Some(max_resolution) = app_data.config.media_max_resolution {
+        let (w, h) = img.dimensions();
+        let factor = (f64::from(w) * f64::from(h)) / f64::from(max_resolution);
+        if factor > 1.0 {
+            let scale = factor.sqrt();
+            let nw = max((f64::from(w) / scale).round() as u32, 1);
+            let nh = max((f64::from(h) / scale).round() as u32, 1);
+            log::debug!("Resize: {}x{} → {}x{} (scale: {})", w, h, nw, nh, scale);
+            img = img.resize(nw, nh, FilterType::Lanczos3);
+        }
+    }
+
     Ok(Either::Right(build_webp_response(
         img,
         &canonical_path,
@@ -338,6 +353,9 @@ struct AppConfig {
 
     #[arg(long)]
     media_passthrough_max_bytes: Option<u64>,
+
+    #[arg(long)]
+    media_max_resolution: Option<u32>,
 
     #[command(flatten)]
     load_image_option: LoadImageOption,
